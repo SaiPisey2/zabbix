@@ -1,0 +1,101 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    zabbix_version: 7.0
+    ubuntu_version: jammy
+    monitoring_scripts_dir: /mnt/scripts
+
+  tasks:
+    - name: Ensure required system packages are installed
+      apt:
+        pkg:
+          - wget
+          - software-properties-common
+          - python3
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Create monitoring scripts directory
+      file:
+        path: "{{ monitoring_scripts_dir }}"
+        state: directory
+        mode: '0755'
+        owner: root
+        group: root
+
+    - name: Copy disk utilization scripts
+      copy:
+        src: "{{ item.src }}"
+        dest: "{{ monitoring_scripts_dir }}/{{ item.dest }}"
+        mode: '0755'
+      loop:
+        - { src: 'disk_util.sh', dest: 'disk_check.sh' }
+        - { src: 'disk.py', dest: 'disk_check.py' }
+
+    - name: Add Zabbix official repository
+      block:
+        - name: Download Zabbix release package
+          get_url:
+            url: "https://repo.zabbix.com/zabbix/{{ zabbix_version }}/ubuntu/pool/main/z/zabbix-release/zabbix-release_{{ zabbix_version }}-1+ubuntu{{ ubuntu_version }}_all.deb"
+            dest: "/tmp/zabbix-release.deb"
+
+        - name: Install Zabbix repository
+          apt:
+            deb: "/tmp/zabbix-release.deb"
+            state: present
+
+    - name: Install Zabbix components
+      apt:
+        pkg:
+          - zabbix-server-mysql
+          - zabbix-frontend-php
+          - zabbix-apache-conf
+          - zabbix-sql-scripts
+          - zabbix-agent
+        state: present
+        update_cache: yes
+
+    - name: Configure Zabbix Agent with Custom Parameters
+      blockinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        block: |
+          # Custom Disk Utilization Check
+          UserParameter=diskCheck,/bin/bash {{ monitoring_scripts_dir }}/diskCheck.sh
+
+    - name: Ensure Zabbix services are started and enabled
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+        enabled: yes
+      loop:
+        - zabbix-server
+        - zabbix-agent
+        - apache2
+
+    - name: Install Python Zabbix API for configuration
+      pip:
+        name: zabbix-api
+        state: present
+
+  post_tasks:
+    - name: Clean up Zabbix repository package
+      file:
+        path: "/tmp/zabbix-release.deb"
+        state: absent
+
+- hosts: zabbix_server
+  become: yes
+  tasks:
+    - name: Auto-configure Zabbix item via API
+      zabbix_item:
+        server_url: http://localhost/zabbix
+        login_user: Admin
+        login_password: zabbix
+        host_name: "{{ inventory_hostname }}"
+        name: "Disk Utilization Over 80%"
+        key: diskCheck
+        type: external
+        value_type: int
+        delay: 5m
